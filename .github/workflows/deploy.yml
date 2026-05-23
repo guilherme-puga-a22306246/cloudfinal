@@ -73,6 +73,13 @@ jobs:
           ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
           EOT
 
+      - name: Prepare EC2 for Ansible
+        run: |
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            -i ~/.ssh/week6-key.pem \
+            ec2-user@${EC2_PUBLIC_IP} \
+            "sudo yum install -y python3"
+
       - name: Test Ansible connection
         run: |
           ANSIBLE_HOST_KEY_CHECKING=False ansible all -i ansible/inventory.ini -m ping
