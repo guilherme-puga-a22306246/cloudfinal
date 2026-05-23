@@ -70,15 +70,16 @@ jobs:
           [all:vars]
           ansible_ssh_private_key_file=~/.ssh/week6-key.pem
           ansible_python_interpreter=/usr/bin/python3
-          ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+          ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
           EOT
 
       - name: Test Ansible connection
-        run: ansible all -i ansible/inventory.ini -m ping
+        run: |
+          ANSIBLE_HOST_KEY_CHECKING=False ansible all -i ansible/inventory.ini -m ping
 
       - name: Deploy services with Ansible
         run: |
-          ansible-playbook \
+          ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
             -i ansible/inventory.ini \
             ansible/playbooks/deploy-services.yml \
             --extra-vars "sqs_queue_url=${SQS_QUEUE_URL}"
