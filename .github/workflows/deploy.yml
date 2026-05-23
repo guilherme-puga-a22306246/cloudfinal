@@ -1,0 +1,83 @@
+name: Deploy to AWS
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: eu-central-1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+
+      - name: Terraform init
+        working-directory: infrastructure/terraform
+        run: terraform init
+
+      - name: Terraform validate
+        working-directory: infrastructure/terraform
+        run: terraform validate
+
+      - name: Terraform plan
+        working-directory: infrastructure/terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform apply
+        working-directory: infrastructure/terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Export Terraform outputs
+        working-directory: infrastructure/terraform
+        run: |
+          echo "EC2_PUBLIC_IP=$(terraform output -raw instance_public_ip)" >> $GITHUB_ENV
+          echo "SQS_QUEUE_URL=$(terraform output -raw product_events_queue_url)" >> $GITHUB_ENV
+
+      - name: Install Ansible
+        run: |
+          sudo apt update
+          sudo apt install -y ansible
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/week6-key.pem
+          chmod 400 ~/.ssh/week6-key.pem
+
+      - name: Generate Ansible inventory
+        run: |
+          cat > ansible/inventory.ini <<EOT
+          [web_servers]
+          web1 ansible_host=${EC2_PUBLIC_IP} ansible_user=ec2-user
+
+          [all:vars]
+          ansible_ssh_private_key_file=~/.ssh/week6-key.pem
+          ansible_python_interpreter=/usr/bin/python3
+          EOT
+
+      - name: Test Ansible connection
+        run: ansible all -i ansible/inventory.ini -m ping
+
+      - name: Deploy services with Ansible
+        run: |
+          ansible-playbook \
+            -i ansible/inventory.ini \
+            ansible/playbooks/deploy-services.yml \
+            --extra-vars "sqs_queue_url=${SQS_QUEUE_URL}"
