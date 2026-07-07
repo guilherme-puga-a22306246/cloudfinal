@@ -57,3 +57,4 @@ logs/
 *.pem
 tools/terraform/terraform.exe
 *.pem
+*.pem

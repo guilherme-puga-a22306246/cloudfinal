@@ -4,7 +4,7 @@
   become: yes
 
   vars:
-    dockerhub_user: "miguelgouveialei"
+    dockerhub_user: "guilhermepuga"
     app_network: "cloud-final-network"
 
   tasks:
