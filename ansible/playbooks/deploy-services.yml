@@ -81,9 +81,18 @@
           --restart unless-stopped \
           --network {{ app_network }} \
           -p 8080:8080 \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_0_ID=user-service \
           -e SPRING_CLOUD_GATEWAY_ROUTES_0_URI=http://user-service:8081 \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_0_PREDICATES_0=Path=/api/users/** \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_0_FILTERS_0=StripPrefix=1 \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_1_ID=product-service \
           -e SPRING_CLOUD_GATEWAY_ROUTES_1_URI=http://product-service:8082 \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_1_PREDICATES_0=Path=/api/products/** \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_1_FILTERS_0=StripPrefix=1 \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_2_ID=order-service \
           -e SPRING_CLOUD_GATEWAY_ROUTES_2_URI=http://order-service:8083 \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_2_PREDICATES_0=Path=/api/orders/** \
+          -e SPRING_CLOUD_GATEWAY_ROUTES_2_FILTERS_0=StripPrefix=1 \
           {{ dockerhub_user }}/api-gateway:latest
 
     - name: Show running containers
