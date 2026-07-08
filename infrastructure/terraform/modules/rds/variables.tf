@@ -28,3 +28,8 @@ variable "db_password" {
   type      = string
   sensitive = true
 }
+
+variable "replicate_source_db" {
+  type    = string
+  default = null
+}

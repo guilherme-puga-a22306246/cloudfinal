@@ -23,7 +23,7 @@ module "compute" {
   key_name      = var.key_name
   allowed_ports = var.allowed_ports
   name_prefix   = local.name_prefix
-  subnet_index  = var.subnet_index //index AZ
+  subnet_index  = var.subnet_index //index AZ 0 1
 }
 
 module "messaging" {
@@ -42,6 +42,7 @@ module "database" {
   db_name               = var.db_name
   db_username           = var.db_username
   db_password           = var.db_password
+  replicate_source_db   = var.replicate_source_db //replicar db
 }
 
 module "alb" {

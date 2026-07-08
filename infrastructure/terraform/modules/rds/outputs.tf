@@ -9,3 +9,13 @@ output "db_name" {
 output "rds_security_group_id" {
   value = aws_security_group.rds.id
 }
+
+//db replicar
+
+output "db_identifier" {
+  value = aws_db_instance.main.identifier
+}
+
+output "db_arn" {
+  value = aws_db_instance.main.arn
+}

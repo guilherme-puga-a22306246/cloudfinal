@@ -57,3 +57,11 @@ output "standby_alb_dns_name" {
 output "standby_product_events_queue_url" {
   value = module.standby.product_events_queue_url
 }
+
+output "primary_instance_id" {
+  value = module.primary.instance_id
+}
+
+output "standby_instance_id" {
+  value = module.standby.instance_id
+}

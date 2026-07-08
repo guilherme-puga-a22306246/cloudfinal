@@ -45,3 +45,13 @@ output "rds_security_group_id" {
 output "alb_dns_name" {
   value = module.alb.dns_name
 }
+
+//db replicar
+
+output "db_identifier" {
+  value = module.database.db_identifier
+}
+
+output "db_arn" {
+  value = module.database.db_arn
+}

@@ -27,6 +27,7 @@ module "primary" {
   db_password          = var.db_password
   deployment_name      = "primary"
   subnet_index         = 0
+  replicate_source_db  = null
 }
 
 
@@ -47,4 +48,5 @@ module "standby" {
   db_password          = var.db_password
   deployment_name      = "standby"
   subnet_index         = 1
+  replicate_source_db  = module.primary.db_arn
 }

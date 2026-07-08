@@ -55,3 +55,8 @@ variable "subnet_index" {
   type    = number
   default = 0
 }
+
+variable "replicate_source_db" {
+  type    = string
+  default = null
+}
