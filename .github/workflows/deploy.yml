@@ -45,13 +45,27 @@ jobs:
         working-directory: infrastructure/terraform
         run: terraform apply -auto-approve tfplan
 
+      - name: Debug Terraform outputs
+        working-directory: infrastructure/terraform
+        run: |
+          terraform output
+          echo "primary ip:"
+          terraform output -raw primary_instance_public_ip || true
+          echo "standby ip:"
+          terraform output -raw standby_instance_public_ip || true
+
       - name: Export Terraform outputs
         working-directory: infrastructure/terraform
         run: |
-          echo "PRIMARY_EC2_PUBLIC_IP=$(terraform output -raw primary_instance_public_ip)" >> $GITHUB_ENV
-          echo "STANDBY_EC2_PUBLIC_IP=$(terraform output -raw standby_instance_public_ip)" >> $GITHUB_ENV
-          echo "PRIMARY_SQS_QUEUE_URL=$(terraform output -raw primary_product_events_queue_url)" >> $GITHUB_ENV
-          echo "STANDBY_SQS_QUEUE_URL=$(terraform output -raw standby_product_events_queue_url)" >> $GITHUB_ENV
+          PRIMARY_EC2_PUBLIC_IP=$(terraform output -raw primary_instance_public_ip)
+          STANDBY_EC2_PUBLIC_IP=$(terraform output -raw standby_instance_public_ip)
+          PRIMARY_SQS_QUEUE_URL=$(terraform output -raw primary_product_events_queue_url)
+          STANDBY_SQS_QUEUE_URL=$(terraform output -raw standby_product_events_queue_url)
+
+          echo "PRIMARY_EC2_PUBLIC_IP=$PRIMARY_EC2_PUBLIC_IP" >> $GITHUB_ENV
+          echo "STANDBY_EC2_PUBLIC_IP=$STANDBY_EC2_PUBLIC_IP" >> $GITHUB_ENV
+          echo "PRIMARY_SQS_QUEUE_URL=$PRIMARY_SQS_QUEUE_URL" >> $GITHUB_ENV
+          echo "STANDBY_SQS_QUEUE_URL=$STANDBY_SQS_QUEUE_URL" >> $GITHUB_ENV
 
       - name: Install Ansible
         run: |
