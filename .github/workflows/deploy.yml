@@ -47,8 +47,10 @@ jobs:
       - name: Export Terraform outputs
         working-directory: infrastructure/terraform
         run: |
-          echo "EC2_PUBLIC_IP=$(terraform output -raw instance_public_ip)" >> $GITHUB_ENV
-          echo "SQS_QUEUE_URL=$(terraform output -raw product_events_queue_url)" >> $GITHUB_ENV
+          echo "PRIMARY_EC2_PUBLIC_IP=$(terraform output -raw primary_instance_public_ip)" >> $GITHUB_ENV
+          echo "STANDBY_EC2_PUBLIC_IP=$(terraform output -raw standby_instance_public_ip)" >> $GITHUB_ENV
+          echo "PRIMARY_SQS_QUEUE_URL=$(terraform output -raw primary_product_events_queue_url)" >> $GITHUB_ENV
+          echo "STANDBY_SQS_QUEUE_URL=$(terraform output -raw standby_product_events_queue_url)" >> $GITHUB_ENV
 
       - name: Install Ansible
         run: |
@@ -65,8 +67,15 @@ jobs:
       - name: Generate Ansible inventory
         run: |
           cat > ansible/inventory.ini <<EOT
-          [web_servers]
-          web1 ansible_host=${EC2_PUBLIC_IP} ansible_user=ec2-user
+          [primary]
+          primary1 ansible_host=${PRIMARY_EC2_PUBLIC_IP} ansible_user=ec2-user sqs_queue_url=${PRIMARY_SQS_QUEUE_URL}
+
+          [standby]
+          standby1 ansible_host=${STANDBY_EC2_PUBLIC_IP} ansible_user=ec2-user sqs_queue_url=${STANDBY_SQS_QUEUE_URL}
+
+          [web_servers:children]
+          primary
+          standby
 
           [all:vars]
           ansible_ssh_private_key_file=~/.ssh/cloud-final-key.pem
@@ -76,10 +85,12 @@ jobs:
 
       - name: Prepare EC2 for Ansible
         run: |
-          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -i ~/.ssh/cloud-final-key.pem \
-            ec2-user@${EC2_PUBLIC_IP} \
-            "sudo yum install -y python3"
+          for ip in "$PRIMARY_EC2_PUBLIC_IP" "$STANDBY_EC2_PUBLIC_IP"; do
+            ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+              -i ~/.ssh/cloud-final-key.pem \
+              ec2-user@$ip \
+              "sudo yum install -y python3"
+          done
 
       - name: Test Ansible connection
         run: |
@@ -89,5 +100,4 @@ jobs:
         run: |
           ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook \
             -i ansible/inventory.ini \
-            ansible/playbooks/deploy-services.yml \
-            --extra-vars "sqs_queue_url=${SQS_QUEUE_URL}"
+            ansible/playbooks/deploy-services.yml
