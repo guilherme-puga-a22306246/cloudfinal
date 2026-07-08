@@ -40,7 +40,7 @@ resource "aws_instance" "web" {
   ami                    = data.aws_ami.amazon_linux.id
   instance_type          = var.instance_type
   key_name               = var.key_name
-  subnet_id              = var.subnet_ids[0]
+  subnet_id              = var.subnet_ids[var.subnet_index] //mudar a az
   vpc_security_group_ids = [aws_security_group.web.id]
 
   tags = {

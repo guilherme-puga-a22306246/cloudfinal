@@ -1,6 +1,8 @@
 locals {
-  name_prefix = "${var.project_name}-${var.environment}"
+  name_prefix = var.deployment_name == "primary" ? "${var.project_name}-${var.environment}" : "${var.project_name}-${var.environment}-${var.deployment_name}"
 }
+
+//para não recriar recursos antigos o primary é o base do cloud-final-dev em vez do cloud-final-dev-primary
 
 module "network" {
   source = "../vpc"
@@ -21,6 +23,7 @@ module "compute" {
   key_name      = var.key_name
   allowed_ports = var.allowed_ports
   name_prefix   = local.name_prefix
+  subnet_index  = var.subnet_index //index AZ
 }
 
 module "messaging" {

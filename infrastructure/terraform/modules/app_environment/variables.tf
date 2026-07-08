@@ -46,3 +46,12 @@ variable "db_password" {
   type      = string
   sensitive = true
 }
+
+variable "deployment_name" {
+  type = string
+}
+
+variable "subnet_index" {
+  type    = number
+  default = 0
+}

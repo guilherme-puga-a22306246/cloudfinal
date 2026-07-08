@@ -33,3 +33,8 @@ variable "allowed_ports" {
 variable "name_prefix" {
   type = string
 }
+
+variable "subnet_index" {
+  type    = number
+  default = 0
+}
