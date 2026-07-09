@@ -44,17 +44,23 @@ resource "aws_db_instance" "main" {
   username = var.replicate_source_db == null ? var.db_username : null
   password = var.replicate_source_db == null ? var.db_password : null
 
-  backup_retention_period   = var.replicate_source_db == null ? 7 : 0
+  backup_retention_period   = var.backup_retention_period
   db_subnet_group_name      = aws_db_subnet_group.main.name
   vpc_security_group_ids    = [aws_security_group.rds.id]
   publicly_accessible       = false
   multi_az                  = true
-  skip_final_snapshot       = false
-  final_snapshot_identifier = "${var.name_prefix}-final-snapshot"
+  skip_final_snapshot       = var.skip_final_snapshot
+  final_snapshot_identifier = var.skip_final_snapshot ? null : "${var.name_prefix}-final-snapshot"
   storage_encrypted         = true
   deletion_protection       = false
+  kms_key_id                = var.kms_key_id
 
   tags = {
     Name = "${var.name_prefix}-database"
+  }
+  lifecycle {
+    ignore_changes = [
+      replicate_source_db
+    ]
   }
 }

@@ -60,3 +60,20 @@ variable "replicate_source_db" {
   type    = string
   default = null
 }
+
+variable "backup_retention_period" {
+  type    = number
+  default = 7
+}
+
+//corrigir erro de destroy do rds para mudar standby de region
+variable "skip_final_snapshot" {
+  type    = bool
+  default = false
+}
+
+//cross region KMS encryption key for standby RDS replica
+variable "kms_key_id" {
+  type    = string
+  default = null
+}

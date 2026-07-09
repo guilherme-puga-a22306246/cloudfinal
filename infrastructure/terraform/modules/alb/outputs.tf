@@ -9,3 +9,9 @@ output "security_group_id" {
 output "target_group_arn" {
   value = aws_lb_target_group.app.arn
 }
+
+//route 53
+
+output "zone_id" {
+  value = aws_lb.main.zone_id
+}

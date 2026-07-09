@@ -55,3 +55,9 @@ output "db_identifier" {
 output "db_arn" {
   value = module.database.db_arn
 }
+
+//route 53
+
+output "alb_zone_id" {
+  value = module.alb.zone_id
+}

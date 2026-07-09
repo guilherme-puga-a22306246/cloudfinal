@@ -33,3 +33,18 @@ variable "replicate_source_db" {
   type    = string
   default = null
 }
+
+variable "backup_retention_period" {
+  type    = number
+  default = 7
+}
+
+variable "skip_final_snapshot" {
+  type    = bool
+  default = false
+}
+
+variable "kms_key_id" {
+  type    = string
+  default = null
+}

@@ -35,14 +35,17 @@ module "messaging" {
 module "database" {
   source = "../rds"
 
-  name_prefix           = local.name_prefix
-  vpc_id                = module.network.vpc_id
-  private_subnet_ids    = module.network.private_subnet_ids
-  app_security_group_id = module.compute.security_group_id
-  db_name               = var.db_name
-  db_username           = var.db_username
-  db_password           = var.db_password
-  replicate_source_db   = var.replicate_source_db //replicar db
+  name_prefix             = local.name_prefix
+  vpc_id                  = module.network.vpc_id
+  private_subnet_ids      = module.network.private_subnet_ids
+  app_security_group_id   = module.compute.security_group_id
+  db_name                 = var.db_name
+  db_username             = var.db_username
+  db_password             = var.db_password
+  replicate_source_db     = var.replicate_source_db //replicar db
+  backup_retention_period = var.backup_retention_period
+  skip_final_snapshot     = var.skip_final_snapshot
+  kms_key_id              = var.kms_key_id
 }
 
 module "alb" {

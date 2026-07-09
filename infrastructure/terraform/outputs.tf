@@ -65,3 +65,13 @@ output "primary_instance_id" {
 output "standby_instance_id" {
   value = module.standby.instance_id
 }
+
+//route 53
+
+output "primary_alb_zone_id" {
+  value = module.primary.alb_zone_id
+}
+
+output "standby_alb_zone_id" {
+  value = module.standby.alb_zone_id
+}
