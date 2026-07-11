@@ -1,0 +1,136 @@
+name: DR Failover Drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Write DRILL to confirm the simulated outage'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  failover-drill:
+    if: ${{ inputs.confirmation == 'DRILL' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: eu-central-1
+
+      - name: Set drill variables
+        run: |
+          echo "PRIMARY_INSTANCE_ID=i-038d121232d69df2b" >> "$GITHUB_ENV"
+          echo "PUBLIC_ENDPOINT=http://cloud.guilhermepuga.pt/actuator/health" >> "$GITHUB_ENV"
+          echo "PRIMARY_ALB_ENDPOINT=http://cloud-final-dev-alb-1556940720.eu-central-1.elb.amazonaws.com/actuator/health" >> "$GITHUB_ENV"
+          echo "STANDBY_ALB_ENDPOINT=http://cloud-final-dev-standby-alb-1126569066.eu-west-1.elb.amazonaws.com/actuator/health" >> "$GITHUB_ENV"
+
+      - name: Confirm initial health
+        run: |
+          curl --fail --silent --show-error "$PUBLIC_ENDPOINT"
+          echo
+          curl --fail --silent --show-error "$PRIMARY_ALB_ENDPOINT"
+          echo
+          curl --fail --silent --show-error "$STANDBY_ALB_ENDPOINT"
+          echo
+
+      - name: Record drill start
+        run: |
+          START_EPOCH=$(date +%s)
+          echo "START_EPOCH=$START_EPOCH" >> "$GITHUB_ENV"
+          echo "Drill started at $(date -u --iso-8601=seconds)" | tee dr-results.txt
+
+      - name: Stop primary EC2
+        run: |
+          aws ec2 stop-instances \
+            --region eu-central-1 \
+            --instance-ids "$PRIMARY_INSTANCE_ID"
+
+          aws ec2 wait instance-stopped \
+            --region eu-central-1 \
+            --instance-ids "$PRIMARY_INSTANCE_ID"
+
+      - name: Wait for DNS failover and measure RTO
+        run: |
+          DEADLINE=$((START_EPOCH + 600))
+          SUCCESS=false
+
+          while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+            NOW=$(date -u --iso-8601=seconds)
+
+            if curl --fail --silent --max-time 10 "$PUBLIC_ENDPOINT" > response.json; then
+              END_EPOCH=$(date +%s)
+              RTO=$((END_EPOCH - START_EPOCH))
+
+              echo "Service recovered through Route 53 at $NOW" | tee -a dr-results.txt
+              echo "Measured RTO: ${RTO} seconds" | tee -a dr-results.txt
+              cat response.json | tee -a dr-results.txt
+              SUCCESS=true
+              break
+            fi
+
+            echo "Waiting for failover at $NOW..." | tee -a dr-results.txt
+            sleep 10
+          done
+
+          if [ "$SUCCESS" != "true" ]; then
+            echo "Failover was not completed within 600 seconds." | tee -a dr-results.txt
+            exit 1
+          fi
+
+      - name: Confirm primary is unavailable and standby is healthy
+        run: |
+          echo "Primary ALB response:" | tee -a dr-results.txt
+          curl --silent --show-error --max-time 10 "$PRIMARY_ALB_ENDPOINT" \
+            | tee -a dr-results.txt || true
+
+          echo | tee -a dr-results.txt
+          echo "Standby ALB response:" | tee -a dr-results.txt
+          curl --fail --silent --show-error --max-time 10 "$STANDBY_ALB_ENDPOINT" \
+            | tee -a dr-results.txt
+
+      - name: Restore primary EC2
+        if: always()
+        run: |
+          aws ec2 start-instances \
+            --region eu-central-1 \
+            --instance-ids "$PRIMARY_INSTANCE_ID"
+
+          aws ec2 wait instance-running \
+            --region eu-central-1 \
+            --instance-ids "$PRIMARY_INSTANCE_ID"
+
+      - name: Wait for primary recovery
+        if: always()
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --max-time 10 "$PRIMARY_ALB_ENDPOINT" > /dev/null; then
+              echo "Primary ALB recovered." | tee -a dr-results.txt
+              exit 0
+            fi
+
+            echo "Waiting for primary recovery: attempt $attempt/60" \
+              | tee -a dr-results.txt
+            sleep 10
+          done
+
+          echo "Primary did not recover within the expected period." \
+            | tee -a dr-results.txt
+          exit 1
+
+      - name: Upload drill evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-failover-results
+          path: |
+            dr-results.txt
+            response.json
+          if-no-files-found: warn
