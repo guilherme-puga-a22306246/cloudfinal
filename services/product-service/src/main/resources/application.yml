@@ -2,22 +2,19 @@ spring:
   application:
     name: product-service
   datasource:
-    url: jdbc:h2:mem:productsdb
-    driver-class-name: org.h2.Driver
-    username: sa
-    password: 
+    url: ${SPRING_DATASOURCE_URL:jdbc:h2:mem:productsdb}
+    username: ${SPRING_DATASOURCE_USERNAME:sa}
+    password: ${SPRING_DATASOURCE_PASSWORD:}
+
   h2:
     console:
-      enabled: true
+      enabled: ${H2_CONSOLE_ENABLED:true}
       path: /h2-console
+
   jpa:
     open-in-view: false
     hibernate:
-      ddl-auto: create-drop
-    show-sql: true
-    properties:
-      hibernate:
-        format_sql: true
+      ddl-auto: ${SPRING_JPA_HIBERNATE_DDL_AUTO:create-drop}
   
   kafka:
     bootstrap-servers: localhost:9092

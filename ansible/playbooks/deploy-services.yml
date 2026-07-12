@@ -57,6 +57,13 @@
           --restart unless-stopped \
           --network {{ app_network }} \
           -p 8082:8082 \
+        {% if use_rds | default(false) | bool %}
+          -e SPRING_DATASOURCE_URL="jdbc:postgresql://{{ db_endpoint }}/appdb" \
+          -e SPRING_DATASOURCE_USERNAME="{{ db_username }}" \
+          -e SPRING_DATASOURCE_PASSWORD="{{ db_password }}" \
+          -e SPRING_JPA_HIBERNATE_DDL_AUTO=update \
+          -e H2_CONSOLE_ENABLED=false \
+        {% endif %}
           -e CLOUD_SQS_PRODUCT_EVENTS_ENABLED=true \
           -e CLOUD_SQS_PRODUCT_EVENTS_QUEUE_URL="{{ sqs_queue_url | default('') }}" \
           {{ dockerhub_user }}/product-service:latest

@@ -1,0 +1,26 @@
+Drill started at 2026-07-11T01:21:46+00:00
+Waiting for failover at 2026-07-11T01:22:23+00:00...
+Waiting for failover at 2026-07-11T01:22:43+00:00...
+Waiting for failover at 2026-07-11T01:22:57+00:00...
+Waiting for failover at 2026-07-11T01:23:07+00:00...
+Waiting for failover at 2026-07-11T01:23:17+00:00...
+Waiting for failover at 2026-07-11T01:23:28+00:00...
+Waiting for failover at 2026-07-11T01:23:38+00:00...
+Waiting for failover at 2026-07-11T01:23:48+00:00...
+Service recovered through Route 53 at 2026-07-11T01:23:58+00:00
+Measured RTO: 133 seconds
+{"status":"UP"}Primary ALB response:
+<html>
+<head><title>503 Service Temporarily Unavailable</title></head>
+<body>
+<center><h1>503 Service Temporarily Unavailable</h1></center>
+</body>
+</html>
+
+Standby ALB response:
+{"status":"UP"}Waiting for primary recovery: attempt 1/60
+Waiting for primary recovery: attempt 2/60
+Waiting for primary recovery: attempt 3/60
+Waiting for primary recovery: attempt 4/60
+Waiting for primary recovery: attempt 5/60
+Primary ALB recovered.
