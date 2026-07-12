@@ -25,20 +25,95 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: eu-central-1
 
-      - name: Set drill variables
+      - name: Read DR state from Parameter Store
         run: |
-          echo "PRIMARY_INSTANCE_ID=i-038d121232d69df2b" >> "$GITHUB_ENV"
+          ACTIVE_REGION=$(aws ssm get-parameter \
+            --region eu-central-1 \
+            --name "/cloud-final/dr/active-region" \
+            --query "Parameter.Value" \
+            --output text)
+
+          PASSIVE_REGION=$(aws ssm get-parameter \
+            --region eu-central-1 \
+            --name "/cloud-final/dr/passive-region" \
+            --query "Parameter.Value" \
+            --output text)
+
+          DR_STATUS=$(aws ssm get-parameter \
+            --region eu-central-1 \
+            --name "/cloud-final/dr/status" \
+            --query "Parameter.Value" \
+            --output text)
+
+          echo "ACTIVE_REGION=$ACTIVE_REGION" >> $GITHUB_ENV
+          echo "PASSIVE_REGION=$PASSIVE_REGION" >> $GITHUB_ENV
+          echo "DR_STATUS=$DR_STATUS" >> $GITHUB_ENV
+
+          echo "Active region: $ACTIVE_REGION"
+          echo "Passive region: $PASSIVE_REGION"
+          echo "Status: $DR_STATUS"
+
+      - name: Resolve DR resources
+        run: |
+          if [ "$DR_STATUS" != "healthy" ]; then
+            echo "DR state must be healthy before starting a drill. Current status: $DR_STATUS"
+            exit 1
+          fi
+
+          if [ "$ACTIVE_REGION" = "eu-central-1" ]; then
+            ACTIVE_INSTANCE_NAME="cloud-final-dev-default-instance"
+            ACTIVE_ALB_NAME="cloud-final-dev-alb"
+            PASSIVE_ALB_NAME="cloud-final-dev-standby-alb"
+          elif [ "$ACTIVE_REGION" = "eu-west-1" ]; then
+            ACTIVE_INSTANCE_NAME="cloud-final-dev-standby-default-instance"
+            ACTIVE_ALB_NAME="cloud-final-dev-standby-alb"
+            PASSIVE_ALB_NAME="cloud-final-dev-alb"
+          else
+            echo "Unsupported active region: $ACTIVE_REGION"
+            exit 1
+          fi
+
+          ACTIVE_INSTANCE_ID=$(aws ec2 describe-instances \
+            --region "$ACTIVE_REGION" \
+            --filters \
+              "Name=tag:Name,Values=$ACTIVE_INSTANCE_NAME" \
+              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+
+          ACTIVE_ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --region "$ACTIVE_REGION" \
+            --names "$ACTIVE_ALB_NAME" \
+            --query "LoadBalancers[0].DNSName" \
+            --output text)
+
+          PASSIVE_ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --region "$PASSIVE_REGION" \
+            --names "$PASSIVE_ALB_NAME" \
+            --query "LoadBalancers[0].DNSName" \
+            --output text)
+
+          if [ -z "$ACTIVE_INSTANCE_ID" ] || [ "$ACTIVE_INSTANCE_ID" = "None" ]; then
+            echo "Could not find the active EC2 instance."
+            exit 1
+          fi
+
+          echo "ACTIVE_INSTANCE_ID=$ACTIVE_INSTANCE_ID" >> "$GITHUB_ENV"
           echo "PUBLIC_ENDPOINT=http://cloud.guilhermepuga.pt/actuator/health" >> "$GITHUB_ENV"
-          echo "PRIMARY_ALB_ENDPOINT=http://cloud-final-dev-alb-1556940720.eu-central-1.elb.amazonaws.com/actuator/health" >> "$GITHUB_ENV"
-          echo "STANDBY_ALB_ENDPOINT=http://cloud-final-dev-standby-alb-1126569066.eu-west-1.elb.amazonaws.com/actuator/health" >> "$GITHUB_ENV"
+          echo "ACTIVE_ALB_ENDPOINT=http://$ACTIVE_ALB_DNS/actuator/health" >> "$GITHUB_ENV"
+          echo "PASSIVE_ALB_ENDPOINT=http://$PASSIVE_ALB_DNS/actuator/health" >> "$GITHUB_ENV"
+
+          echo "Active region: $ACTIVE_REGION"
+          echo "Passive region: $PASSIVE_REGION"
+          echo "Active instance: $ACTIVE_INSTANCE_ID"
 
       - name: Confirm initial health
         run: |
           curl --fail --silent --show-error "$PUBLIC_ENDPOINT"
           echo
-          curl --fail --silent --show-error "$PRIMARY_ALB_ENDPOINT"
+          curl --fail --silent --show-error "$ACTIVE_ALB_ENDPOINT"
           echo
-          curl --fail --silent --show-error "$STANDBY_ALB_ENDPOINT"
+          curl --fail --silent --show-error "$PASSIVE_ALB_ENDPOINT"
           echo
 
       - name: Record drill start
@@ -47,15 +122,15 @@ jobs:
           echo "START_EPOCH=$START_EPOCH" >> "$GITHUB_ENV"
           echo "Drill started at $(date -u --iso-8601=seconds)" | tee dr-results.txt
 
-      - name: Stop primary EC2
+      - name: Stop active EC2
         run: |
           aws ec2 stop-instances \
-            --region eu-central-1 \
-            --instance-ids "$PRIMARY_INSTANCE_ID"
+            --region "$ACTIVE_REGION" \
+            --instance-ids "$ACTIVE_INSTANCE_ID"
 
           aws ec2 wait instance-stopped \
-            --region eu-central-1 \
-            --instance-ids "$PRIMARY_INSTANCE_ID"
+            --region "$ACTIVE_REGION" \
+            --instance-ids "$ACTIVE_INSTANCE_ID"
 
       - name: Wait for DNS failover and measure RTO
         run: |
@@ -85,43 +160,43 @@ jobs:
             exit 1
           fi
 
-      - name: Confirm primary is unavailable and standby is healthy
+      - name: Confirm active environment is unavailable and passive is healthy
         run: |
-          echo "Primary ALB response:" | tee -a dr-results.txt
-          curl --silent --show-error --max-time 10 "$PRIMARY_ALB_ENDPOINT" \
+          echo "Active ALB response:" | tee -a dr-results.txt
+          curl --silent --show-error --max-time 10 "$ACTIVE_ALB_ENDPOINT" \
             | tee -a dr-results.txt || true
 
           echo | tee -a dr-results.txt
-          echo "Standby ALB response:" | tee -a dr-results.txt
-          curl --fail --silent --show-error --max-time 10 "$STANDBY_ALB_ENDPOINT" \
+          echo "Passive ALB response:" | tee -a dr-results.txt
+          curl --fail --silent --show-error --max-time 10 "$PASSIVE_ALB_ENDPOINT" \
             | tee -a dr-results.txt
 
-      - name: Restore primary EC2
+      - name: Restore active EC2
         if: always()
         run: |
           aws ec2 start-instances \
-            --region eu-central-1 \
-            --instance-ids "$PRIMARY_INSTANCE_ID"
+            --region "$ACTIVE_REGION" \
+            --instance-ids "$ACTIVE_INSTANCE_ID"
 
           aws ec2 wait instance-running \
-            --region eu-central-1 \
-            --instance-ids "$PRIMARY_INSTANCE_ID"
+            --region "$ACTIVE_REGION" \
+            --instance-ids "$ACTIVE_INSTANCE_ID"
 
-      - name: Wait for primary recovery
+      - name: Wait for active environment recovery
         if: always()
         run: |
           for attempt in $(seq 1 60); do
-            if curl --fail --silent --max-time 10 "$PRIMARY_ALB_ENDPOINT" > /dev/null; then
-              echo "Primary ALB recovered." | tee -a dr-results.txt
+            if curl --fail --silent --max-time 10 "$ACTIVE_ALB_ENDPOINT" > /dev/null; then
+              echo "Active ALB recovered." | tee -a dr-results.txt
               exit 0
             fi
 
-            echo "Waiting for primary recovery: attempt $attempt/60" \
+            echo "Waiting for active recovery: attempt $attempt/60" \
               | tee -a dr-results.txt
             sleep 10
           done
 
-          echo "Primary did not recover within the expected period." \
+          echo "Active environment did not recover within the expected period." \
             | tee -a dr-results.txt
           exit 1
 
