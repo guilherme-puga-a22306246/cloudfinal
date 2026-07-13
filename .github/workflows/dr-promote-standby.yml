@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       confirmation:
-        description: 'Write PROMOTE to confirm permanent failover'
+        description: "Write PROMOTE to confirm permanent failover"
         required: true
         type: string
 
@@ -12,11 +12,15 @@ permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: cloud-final-dr-operation
+  cancel-in-progress: false
+
 jobs:
   promote-standby:
     if: ${{ inputs.confirmation == 'PROMOTE' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Configure AWS credentials with OIDC
@@ -25,36 +29,78 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: eu-central-1
 
-      - name: Read DR state
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Prepare SSH key
         run: |
-          ACTIVE_REGION=$(aws ssm get-parameter \
-            --region eu-central-1 \
-            --name "/cloud-final/dr/active-region" \
-            --query "Parameter.Value" \
-            --output text)
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_PRIVATE_KEY }}" > ~/.ssh/cloud-final-key.pem
+          chmod 400 ~/.ssh/cloud-final-key.pem
 
-          PASSIVE_REGION=$(aws ssm get-parameter \
-            --region eu-central-1 \
-            --name "/cloud-final/dr/passive-region" \
-            --query "Parameter.Value" \
-            --output text)
+      - name: Read DR state
+        shell: bash
+        run: |
+          set -euo pipefail
 
-          DR_STATUS=$(aws ssm get-parameter \
-            --region eu-central-1 \
-            --name "/cloud-final/dr/status" \
-            --query "Parameter.Value" \
-            --output text)
+          read_state_from_region() {
+            local region="$1"
+
+            local active
+            local passive
+            local status
+
+            active=$(aws ssm get-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/active-region" \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null) || return 1
+
+            passive=$(aws ssm get-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/passive-region" \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null) || return 1
+
+            status=$(aws ssm get-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/status" \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null) || return 1
+
+            echo "$active|$passive|$status|$region"
+          }
+
+          DR_STATE=""
+
+          for region in eu-central-1 eu-west-1; do
+            if DR_STATE=$(read_state_from_region "$region"); then
+              break
+            fi
+          done
+
+          if [ -z "$DR_STATE" ]; then
+            echo "Could not read the complete DR state from either region."
+            exit 1
+          fi
+
+          IFS='|' read -r ACTIVE_REGION PASSIVE_REGION DR_STATUS CONTROL_REGION <<< "$DR_STATE"
 
           echo "ACTIVE_REGION=$ACTIVE_REGION" >> "$GITHUB_ENV"
           echo "PASSIVE_REGION=$PASSIVE_REGION" >> "$GITHUB_ENV"
           echo "DR_STATUS=$DR_STATUS" >> "$GITHUB_ENV"
+          echo "CONTROL_REGION=$CONTROL_REGION" >> "$GITHUB_ENV"
 
           echo "Active region: $ACTIVE_REGION"
           echo "Passive region: $PASSIVE_REGION"
           echo "DR status: $DR_STATUS"
+          echo "State read from: $CONTROL_REGION"
 
       - name: Validate DR state
+        shell: bash
         run: |
+          set -euo pipefail
+
           if [ "$DR_STATUS" != "healthy" ]; then
             echo "Promotion requires status=healthy. Current status: $DR_STATUS"
             exit 1
@@ -65,19 +111,28 @@ jobs:
             exit 1
           fi
 
+          case "$ACTIVE_REGION:$PASSIVE_REGION" in
+            eu-central-1:eu-west-1|eu-west-1:eu-central-1)
+              ;;
+            *)
+              echo "Unsupported DR region pair: $ACTIVE_REGION -> $PASSIVE_REGION"
+              exit 1
+              ;;
+          esac
+
       - name: Resolve regional resources
+        shell: bash
         run: |
+          set -euo pipefail
+
           if [ "$PASSIVE_REGION" = "eu-west-1" ]; then
             PASSIVE_DB_ID="cloud-final-dev-standby-database"
             PASSIVE_INSTANCE_NAME="cloud-final-dev-standby-default-instance"
             PASSIVE_ALB_NAME="cloud-final-dev-standby-alb"
-          elif [ "$PASSIVE_REGION" = "eu-central-1" ]; then
+          else
             PASSIVE_DB_ID="cloud-final-dev-database"
             PASSIVE_INSTANCE_NAME="cloud-final-dev-default-instance"
             PASSIVE_ALB_NAME="cloud-final-dev-alb"
-          else
-            echo "Unsupported passive region: $PASSIVE_REGION"
-            exit 1
           fi
 
           PASSIVE_INSTANCE_ID=$(aws ec2 describe-instances \
@@ -94,6 +149,16 @@ jobs:
             --query "LoadBalancers[0].DNSName" \
             --output text)
 
+          if [ -z "$PASSIVE_INSTANCE_ID" ] || [ "$PASSIVE_INSTANCE_ID" = "None" ]; then
+            echo "Could not resolve passive EC2."
+            exit 1
+          fi
+
+          if [ -z "$PASSIVE_ALB_DNS" ] || [ "$PASSIVE_ALB_DNS" = "None" ]; then
+            echo "Could not resolve passive ALB."
+            exit 1
+          fi
+
           echo "PASSIVE_DB_ID=$PASSIVE_DB_ID" >> "$GITHUB_ENV"
           echo "PASSIVE_INSTANCE_ID=$PASSIVE_INSTANCE_ID" >> "$GITHUB_ENV"
           echo "PASSIVE_ALB_DNS=$PASSIVE_ALB_DNS" >> "$GITHUB_ENV"
@@ -103,7 +168,10 @@ jobs:
           echo "Passive ALB: $PASSIVE_ALB_DNS"
 
       - name: Validate passive RDS replica
+        shell: bash
         run: |
+          set -euo pipefail
+
           DB_STATUS=$(aws rds describe-db-instances \
             --region "$PASSIVE_REGION" \
             --db-instance-identifier "$PASSIVE_DB_ID" \
@@ -128,3 +196,373 @@ jobs:
             echo "Passive RDS is not a read replica."
             exit 1
           fi
+
+      - name: Mark DR as failing-over
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for region in eu-central-1 eu-west-1; do
+            aws ssm put-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/status" \
+              --type String \
+              --value "failing-over" \
+              --overwrite
+          done
+
+          echo "DR status updated to failing-over in both regions."
+
+      - name: Promote standby RDS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws rds promote-read-replica \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID"
+
+          echo "Promotion requested for $PASSIVE_DB_ID in $PASSIVE_REGION."
+
+      - name: Wait for promoted database
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws rds wait db-instance-available \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID"
+
+          echo "Promoted database is available."
+
+      - name: Validate promotion and read endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NEW_DB_ENDPOINT=$(aws rds describe-db-instances \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --query "DBInstances[0].Endpoint.Address" \
+            --output text)
+
+          REPLICA_SOURCE=$(aws rds describe-db-instances \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --query "DBInstances[0].ReadReplicaSourceDBInstanceIdentifier" \
+            --output text)
+
+          DB_STATUS=$(aws rds describe-db-instances \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --query "DBInstances[0].DBInstanceStatus" \
+            --output text)
+
+          if [ "$DB_STATUS" != "available" ]; then
+            echo "Promoted database is not available."
+            exit 1
+          fi
+
+          if [ -n "$REPLICA_SOURCE" ] && [ "$REPLICA_SOURCE" != "None" ]; then
+            echo "Database still reports a replica source; promotion was not completed."
+            exit 1
+          fi
+
+          echo "NEW_DB_ENDPOINT=$NEW_DB_ENDPOINT" >> "$GITHUB_ENV"
+
+          echo "Promotion completed."
+          echo "New primary region: $PASSIVE_REGION"
+          echo "New database endpoint: $NEW_DB_ENDPOINT"
+
+      - name: Read database credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          read_secret() {
+            local parameter_name="$1"
+            local value=""
+
+            for region in "$PASSIVE_REGION" "$ACTIVE_REGION"; do
+              if value=$(aws ssm get-parameter \
+                --region "$region" \
+                --name "$parameter_name" \
+                --with-decryption \
+                --query "Parameter.Value" \
+                --output text 2>/dev/null); then
+                echo "$value"
+                return 0
+              fi
+            done
+
+            echo "Could not read $parameter_name." >&2
+            return 1
+          }
+
+          DB_USERNAME=$(read_secret "/cloud-final/db/username")
+          DB_PASSWORD=$(read_secret "/cloud-final/db/password")
+
+          echo "::add-mask::$DB_PASSWORD"
+          echo "DB_USERNAME=$DB_USERNAME" >> "$GITHUB_ENV"
+          echo "DB_PASSWORD=$DB_PASSWORD" >> "$GITHUB_ENV"
+          
+
+      - name: Ensure passive EC2 is running
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          INSTANCE_STATE=$(aws ec2 describe-instances \
+            --region "$PASSIVE_REGION" \
+            --instance-ids "$PASSIVE_INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].State.Name" \
+            --output text)
+
+          if [ "$INSTANCE_STATE" != "running" ]; then
+            aws ec2 start-instances \
+              --region "$PASSIVE_REGION" \
+              --instance-ids "$PASSIVE_INSTANCE_ID"
+
+            aws ec2 wait instance-running \
+              --region "$PASSIVE_REGION" \
+              --instance-ids "$PASSIVE_INSTANCE_ID"
+          fi
+
+          PASSIVE_PUBLIC_IP=$(aws ec2 describe-instances \
+            --region "$PASSIVE_REGION" \
+            --instance-ids "$PASSIVE_INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].PublicIpAddress" \
+            --output text)
+
+          echo "PASSIVE_PUBLIC_IP=$PASSIVE_PUBLIC_IP" >> "$GITHUB_ENV"
+          echo "Passive EC2 IP: $PASSIVE_PUBLIC_IP"
+          
+      - name: Point passive product service to promoted RDS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ssh -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -i ~/.ssh/cloud-final-key.pem \
+            ec2-user@"$PASSIVE_PUBLIC_IP" \
+            "sudo docker pull aguenta/product-service:latest &&
+             sudo docker rm -f product-service 2>/dev/null || true;
+             sudo docker run -d \
+               --name product-service \
+               --restart unless-stopped \
+               --network cloud-final-network \
+               -p 8082:8082 \
+               -e SPRING_DATASOURCE_URL='jdbc:postgresql://${NEW_DB_ENDPOINT}:5432/appdb' \
+               -e SPRING_DATASOURCE_USERNAME='${DB_USERNAME}' \
+               -e SPRING_DATASOURCE_PASSWORD='${DB_PASSWORD}' \
+               -e SPRING_JPA_HIBERNATE_DDL_AUTO=update \
+               -e H2_CONSOLE_ENABLED=false \
+               aguenta/product-service:latest"
+
+      - name: Validate promoted application
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 60); do
+            HEALTH=$(ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -i ~/.ssh/cloud-final-key.pem \
+              ec2-user@"$PASSIVE_PUBLIC_IP" \
+              "curl --fail --silent --max-time 10 http://localhost:8082/actuator/health" \
+              2>/dev/null || true)
+
+            echo "$HEALTH"
+
+            if echo "$HEALTH" | grep -q '"database":"PostgreSQL"'; then
+              echo "Product service is healthy and using promoted PostgreSQL."
+              exit 0
+            fi
+
+            echo "Waiting for promoted product service: $attempt/60"
+            sleep 10
+          done
+
+          echo "Product service did not become healthy with PostgreSQL."
+          exit 1
+          
+      - name: Resolve Route 53 records
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          HOSTED_ZONE_ID="Z0992149358N66C01DB6Y"
+          DOMAIN_NAME="cloud.guilhermepuga.pt"
+
+          if [ "$ACTIVE_REGION" = "eu-central-1" ]; then
+            OLD_ACTIVE_ALB_NAME="cloud-final-dev-alb"
+            NEW_ACTIVE_ALB_NAME="cloud-final-dev-standby-alb"
+          else
+            OLD_ACTIVE_ALB_NAME="cloud-final-dev-standby-alb"
+            NEW_ACTIVE_ALB_NAME="cloud-final-dev-alb"
+          fi
+
+          OLD_ACTIVE_ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --region "$ACTIVE_REGION" \
+            --names "$OLD_ACTIVE_ALB_NAME" \
+            --query "LoadBalancers[0].DNSName" \
+            --output text)
+
+          OLD_ACTIVE_ALB_ZONE_ID=$(aws elbv2 describe-load-balancers \
+            --region "$ACTIVE_REGION" \
+            --names "$OLD_ACTIVE_ALB_NAME" \
+            --query "LoadBalancers[0].CanonicalHostedZoneId" \
+            --output text)
+
+          NEW_ACTIVE_ALB_ZONE_ID=$(aws elbv2 describe-load-balancers \
+            --region "$PASSIVE_REGION" \
+            --names "$NEW_ACTIVE_ALB_NAME" \
+            --query "LoadBalancers[0].CanonicalHostedZoneId" \
+            --output text)
+
+          OLD_ACTIVE_HEALTH_CHECK_ID=$(aws route53 list-health-checks \
+            --query "HealthChecks[?HealthCheckConfig.FullyQualifiedDomainName=='${OLD_ACTIVE_ALB_DNS}'].Id | [0]" \
+            --output text)
+
+          NEW_ACTIVE_HEALTH_CHECK_ID=$(aws route53 list-health-checks \
+            --query "HealthChecks[?HealthCheckConfig.FullyQualifiedDomainName=='${PASSIVE_ALB_DNS}'].Id | [0]" \
+            --output text)
+
+          if [ -z "$OLD_ACTIVE_HEALTH_CHECK_ID" ] || [ "$OLD_ACTIVE_HEALTH_CHECK_ID" = "None" ]; then
+            echo "Could not resolve old active Route 53 health check."
+            exit 1
+          fi
+
+          if [ -z "$NEW_ACTIVE_HEALTH_CHECK_ID" ] || [ "$NEW_ACTIVE_HEALTH_CHECK_ID" = "None" ]; then
+            echo "Could not resolve new active Route 53 health check."
+            exit 1
+          fi
+
+          echo "HOSTED_ZONE_ID=$HOSTED_ZONE_ID" >> "$GITHUB_ENV"
+          echo "DOMAIN_NAME=$DOMAIN_NAME" >> "$GITHUB_ENV"
+          echo "OLD_ACTIVE_ALB_DNS=$OLD_ACTIVE_ALB_DNS" >> "$GITHUB_ENV"
+          echo "OLD_ACTIVE_ALB_ZONE_ID=$OLD_ACTIVE_ALB_ZONE_ID" >> "$GITHUB_ENV"
+          echo "NEW_ACTIVE_ALB_ZONE_ID=$NEW_ACTIVE_ALB_ZONE_ID" >> "$GITHUB_ENV"
+          echo "OLD_ACTIVE_HEALTH_CHECK_ID=$OLD_ACTIVE_HEALTH_CHECK_ID" >> "$GITHUB_ENV"
+          echo "NEW_ACTIVE_HEALTH_CHECK_ID=$NEW_ACTIVE_HEALTH_CHECK_ID" >> "$GITHUB_ENV"
+
+      - name: Swap Route 53 failover roles
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > route53-change.json <<EOF
+          {
+            "Comment": "Promote ${PASSIVE_REGION} as active DR region",
+            "Changes": [
+              {
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "${DOMAIN_NAME}",
+                  "Type": "A",
+                  "SetIdentifier": "${PASSIVE_REGION}",
+                  "Failover": "PRIMARY",
+                  "HealthCheckId": "${NEW_ACTIVE_HEALTH_CHECK_ID}",
+                  "AliasTarget": {
+                    "HostedZoneId": "${NEW_ACTIVE_ALB_ZONE_ID}",
+                    "DNSName": "${PASSIVE_ALB_DNS}",
+                    "EvaluateTargetHealth": true
+                  }
+                }
+              },
+              {
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "${DOMAIN_NAME}",
+                  "Type": "A",
+                  "SetIdentifier": "${ACTIVE_REGION}",
+                  "Failover": "SECONDARY",
+                  "HealthCheckId": "${OLD_ACTIVE_HEALTH_CHECK_ID}",
+                  "AliasTarget": {
+                    "HostedZoneId": "${OLD_ACTIVE_ALB_ZONE_ID}",
+                    "DNSName": "${OLD_ACTIVE_ALB_DNS}",
+                    "EvaluateTargetHealth": true
+                  }
+                }
+              }
+            ]
+          }
+          EOF
+
+          CHANGE_ID=$(aws route53 change-resource-record-sets \
+            --hosted-zone-id "$HOSTED_ZONE_ID" \
+            --change-batch file://route53-change.json \
+            --query "ChangeInfo.Id" \
+            --output text)
+
+          echo "ROUTE53_CHANGE_ID=$CHANGE_ID" >> "$GITHUB_ENV"
+          echo "Route 53 change submitted: $CHANGE_ID"
+          
+      - name: Wait for Route 53 propagation
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws route53 wait resource-record-sets-changed \
+            --id "$ROUTE53_CHANGE_ID"
+
+          echo "Route 53 change is INSYNC."
+
+      - name: Validate public endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --max-time 10 \
+              "http://${DOMAIN_NAME}/actuator/health" > public-health.json; then
+              cat public-health.json
+              echo "Public endpoint is healthy after role swap."
+              exit 0
+            fi
+
+            echo "Waiting for public endpoint: $attempt/60"
+            sleep 10
+          done
+
+          echo "Public endpoint did not become healthy."
+          exit 1
+
+      - name: Commit new DR state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NEW_ACTIVE_REGION="$PASSIVE_REGION"
+          NEW_PASSIVE_REGION="$ACTIVE_REGION"
+
+          for region in eu-central-1 eu-west-1; do
+            aws ssm put-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/active-region" \
+              --type String \
+              --value "$NEW_ACTIVE_REGION" \
+              --overwrite
+
+            aws ssm put-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/passive-region" \
+              --type String \
+              --value "$NEW_PASSIVE_REGION" \
+              --overwrite
+
+            aws ssm put-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/status" \
+              --type String \
+              --value "failed-over" \
+              --overwrite
+          done
+
+          echo "DR promotion completed."
+          echo "Active region: $NEW_ACTIVE_REGION"
+          echo "Passive region: $NEW_PASSIVE_REGION"
+          echo "Status: failed-over"
+      
