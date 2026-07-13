@@ -224,55 +224,51 @@ jobs:
 
           echo "Promotion requested for $PASSIVE_DB_ID in $PASSIVE_REGION."
 
-      - name: Wait for promoted database
+      - name: Wait for promotion to complete
         shell: bash
         run: |
           set -euo pipefail
 
-          aws rds wait db-instance-available \
-            --region "$PASSIVE_REGION" \
-            --db-instance-identifier "$PASSIVE_DB_ID"
+          for attempt in $(seq 1 120); do
 
-          echo "Promoted database is available."
+            STATUS=$(aws rds describe-db-instances \
+              --region "$PASSIVE_REGION" \
+              --db-instance-identifier "$PASSIVE_DB_ID" \
+              --query "DBInstances[0].DBInstanceStatus" \
+              --output text)
 
-      - name: Validate promotion and read endpoint
-        shell: bash
-        run: |
-          set -euo pipefail
+            SOURCE=$(aws rds describe-db-instances \
+              --region "$PASSIVE_REGION" \
+              --db-instance-identifier "$PASSIVE_DB_ID" \
+              --query "DBInstances[0].ReadReplicaSourceDBInstanceIdentifier" \
+              --output text)
 
-          NEW_DB_ENDPOINT=$(aws rds describe-db-instances \
-            --region "$PASSIVE_REGION" \
-            --db-instance-identifier "$PASSIVE_DB_ID" \
-            --query "DBInstances[0].Endpoint.Address" \
-            --output text)
+            echo "Status: $STATUS"
+            echo "Replica source: $SOURCE"
 
-          REPLICA_SOURCE=$(aws rds describe-db-instances \
-            --region "$PASSIVE_REGION" \
-            --db-instance-identifier "$PASSIVE_DB_ID" \
-            --query "DBInstances[0].ReadReplicaSourceDBInstanceIdentifier" \
-            --output text)
+            if [ "$STATUS" = "available" ] && \
+               { [ -z "$SOURCE" ] || [ "$SOURCE" = "None" ]; }; then
 
-          DB_STATUS=$(aws rds describe-db-instances \
-            --region "$PASSIVE_REGION" \
-            --db-instance-identifier "$PASSIVE_DB_ID" \
-            --query "DBInstances[0].DBInstanceStatus" \
-            --output text)
+                ENDPOINT=$(aws rds describe-db-instances \
+                  --region "$PASSIVE_REGION" \
+                  --db-instance-identifier "$PASSIVE_DB_ID" \
+                  --query "DBInstances[0].Endpoint.Address" \
+                  --output text)
 
-          if [ "$DB_STATUS" != "available" ]; then
-            echo "Promoted database is not available."
-            exit 1
-          fi
+                echo "NEW_DB_ENDPOINT=$ENDPOINT" >> "$GITHUB_ENV"
 
-          if [ -n "$REPLICA_SOURCE" ] && [ "$REPLICA_SOURCE" != "None" ]; then
-            echo "Database still reports a replica source; promotion was not completed."
-            exit 1
-          fi
+                echo "Promotion completed."
 
-          echo "NEW_DB_ENDPOINT=$NEW_DB_ENDPOINT" >> "$GITHUB_ENV"
+                exit 0
+            fi
 
-          echo "Promotion completed."
-          echo "New primary region: $PASSIVE_REGION"
-          echo "New database endpoint: $NEW_DB_ENDPOINT"
+            sleep 15
+
+          done
+
+          echo "Promotion timed out."
+
+          exit 1
 
       - name: Read database credentials
         shell: bash

@@ -24,6 +24,34 @@ provider "aws" {
   }
 }
 
+data "aws_ssm_parameter" "active_region" {
+  provider = aws.primary
+  name     = "/cloud-final/dr/active-region"
+}
+
+data "aws_caller_identity" "current" {}
+
+locals {
+  active_region = data.aws_ssm_parameter.active_region.value
+
+  central_db_arn = "arn:aws:rds:eu-central-1:${data.aws_caller_identity.current.account_id}:db:cloud-final-dev-database"
+  west_db_arn    = "arn:aws:rds:eu-west-1:${data.aws_caller_identity.current.account_id}:db:cloud-final-dev-standby-database"
+}
+
+resource "aws_kms_key" "primary_rds" {
+  provider = aws.primary
+
+  description             = "KMS key for eu-central-1 RDS replica"
+  deletion_window_in_days = 7
+}
+
+resource "aws_kms_alias" "primary_rds" {
+  provider = aws.primary
+
+  name          = "alias/cloud-final-primary-rds"
+  target_key_id = aws_kms_key.primary_rds.key_id
+}
+
 resource "aws_kms_key" "standby_rds" {
   provider = aws.standby
 
@@ -59,7 +87,8 @@ module "primary" {
   db_password          = var.db_password
   deployment_name      = "primary"
   subnet_index         = 0
-  replicate_source_db  = null
+  replicate_source_db  = local.active_region == "eu-west-1" ? local.west_db_arn : null
+  kms_key_id           = local.active_region == "eu-west-1" ? aws_kms_key.primary_rds.arn : null
 }
 
 
@@ -84,16 +113,22 @@ module "standby" {
   db_password          = var.db_password
   deployment_name      = "standby"
   subnet_index         = 1
-  replicate_source_db  = module.primary.db_arn
-  kms_key_id           = aws_kms_key.standby_rds.arn
+  replicate_source_db  = local.active_region == "eu-central-1" ? local.central_db_arn : null
+  kms_key_id           = local.active_region == "eu-central-1" ? aws_kms_key.standby_rds.arn : null
   skip_final_snapshot  = true
 }
 
 module "route53" {
   source = "./modules/route53"
 
-  hosted_zone_id       = "Z0992149358N66C01DB6Y"
-  domain_name          = "cloud.guilhermepuga.pt"
+  providers = {
+    aws = aws.primary
+  }
+
+  hosted_zone_id = "Z0992149358N66C01DB6Y"
+  domain_name    = "cloud.guilhermepuga.pt"
+  active_region  = local.active_region
+
   primary_alb_dns_name = module.primary.alb_dns_name
   primary_alb_zone_id  = module.primary.alb_zone_id
   standby_alb_dns_name = module.standby.alb_dns_name

@@ -32,35 +32,34 @@ resource "aws_security_group" "rds" {
 }
 
 resource "aws_db_instance" "main" {
+  identifier = "${var.name_prefix}-database"
 
-  identifier          = "${var.name_prefix}-database"
-  engine              = "postgres"
-  instance_class      = "db.t3.micro"
-  allocated_storage   = 20
-  storage_type        = "gp3"
   replicate_source_db = var.replicate_source_db
+
+  engine         = var.replicate_source_db == null ? "postgres" : null
+  instance_class = "db.t3.micro"
+
+  allocated_storage = var.replicate_source_db == null ? 20 : null
+  storage_type      = var.replicate_source_db == null ? "gp3" : null
 
   db_name  = var.replicate_source_db == null ? var.db_name : null
   username = var.replicate_source_db == null ? var.db_username : null
   password = var.replicate_source_db == null ? var.db_password : null
 
-  backup_retention_period   = var.backup_retention_period
-  db_subnet_group_name      = aws_db_subnet_group.main.name
-  vpc_security_group_ids    = [aws_security_group.rds.id]
-  publicly_accessible       = false
-  multi_az                  = true
+  db_subnet_group_name   = aws_db_subnet_group.main.name
+  vpc_security_group_ids = [aws_security_group.rds.id]
+
+  publicly_accessible = false
+  multi_az            = true
+  storage_encrypted   = true
+  kms_key_id          = var.kms_key_id
+
+  backup_retention_period = var.replicate_source_db == null ? var.backup_retention_period : 0
+
   skip_final_snapshot       = var.skip_final_snapshot
   final_snapshot_identifier = var.skip_final_snapshot ? null : "${var.name_prefix}-final-snapshot"
-  storage_encrypted         = true
-  deletion_protection       = false
-  kms_key_id                = var.kms_key_id
 
   tags = {
     Name = "${var.name_prefix}-database"
-  }
-  lifecycle {
-    ignore_changes = [
-      replicate_source_db
-    ]
   }
 }

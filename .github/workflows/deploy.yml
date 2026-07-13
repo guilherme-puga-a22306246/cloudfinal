@@ -118,16 +118,29 @@ jobs:
           echo "PRIMARY_DB_ENDPOINT=$PRIMARY_DB_ENDPOINT" >> "$GITHUB_ENV"
           echo "STANDBY_DB_ENDPOINT=$STANDBY_DB_ENDPOINT" >> "$GITHUB_ENV"
 
-          echo "::add-mask::$DB_PASSWORD"    
+          echo "::add-mask::$DB_PASSWORD"
+          
+      - name: Decide active database region
+        run: |
+          if [ "$ACTIVE_REGION" = "eu-central-1" ]; then
+            echo "PRIMARY_USE_RDS=true" >> "$GITHUB_ENV"
+            echo "STANDBY_USE_RDS=false" >> "$GITHUB_ENV"
+          else
+            echo "PRIMARY_USE_RDS=false" >> "$GITHUB_ENV"
+            echo "STANDBY_USE_RDS=true" >> "$GITHUB_ENV"
+          fi
+
+          echo "Primary use_rds=$PRIMARY_USE_RDS"
+          echo "Standby use_rds=$STANDBY_USE_RDS"
 
       - name: Generate Ansible inventory
         run: |
           cat > ansible/inventory.ini <<EOT
           [primary]
-          primary1 ansible_host=${PRIMARY_EC2_PUBLIC_IP} ansible_user=ec2-user sqs_queue_url=${PRIMARY_SQS_QUEUE_URL} db_endpoint=${PRIMARY_DB_ENDPOINT} db_username=${DB_USERNAME} db_password='${DB_PASSWORD}' use_rds=true
+          primary1 ansible_host=${PRIMARY_EC2_PUBLIC_IP} ansible_user=ec2-user sqs_queue_url=${PRIMARY_SQS_QUEUE_URL} db_endpoint=${PRIMARY_DB_ENDPOINT} db_username=${DB_USERNAME} db_password='${DB_PASSWORD}' use_rds=${PRIMARY_USE_RDS}
 
           [standby]
-          standby1 ansible_host=${STANDBY_EC2_PUBLIC_IP} ansible_user=ec2-user sqs_queue_url=${STANDBY_SQS_QUEUE_URL} db_endpoint=${STANDBY_DB_ENDPOINT} db_username=${DB_USERNAME} db_password='${DB_PASSWORD}' use_rds=false
+          standby1 ansible_host=${STANDBY_EC2_PUBLIC_IP} ansible_user=ec2-user sqs_queue_url=${STANDBY_SQS_QUEUE_URL} db_endpoint=${STANDBY_DB_ENDPOINT} db_username=${DB_USERNAME} db_password='${DB_PASSWORD}' use_rds=${STANDBY_USE_RDS}
 
           [web_servers:children]
           primary

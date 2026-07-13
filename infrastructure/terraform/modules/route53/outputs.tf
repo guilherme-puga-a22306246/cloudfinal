@@ -1,5 +1,9 @@
-output "health_check_id" {
-  value = aws_route53_health_check.primary.id
+output "central_health_check_id" {
+  value = aws_route53_health_check.central.id
+}
+
+output "west_health_check_id" {
+  value = aws_route53_health_check.west.id
 }
 
 output "record_name" {

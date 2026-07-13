@@ -1,0 +1,286 @@
+name: DR Rebuild Former Primary
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: "Write REBUILD to recreate the former primary as standby"
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cloud-final-dr-operation
+  cancel-in-progress: false
+
+jobs:
+  rebuild-former-primary:
+    if: ${{ inputs.confirmation == 'REBUILD' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # Podes associar isto a um GitHub Environment com aprovação obrigatória.
+    environment: disaster-recovery
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: eu-central-1
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.0
+          terraform_wrapper: false
+
+      - name: Read and validate DR state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          read_state_from_region() {
+            local region="$1"
+
+            local active
+            local passive
+            local status
+
+            active=$(aws ssm get-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/active-region" \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null) || return 1
+
+            passive=$(aws ssm get-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/passive-region" \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null) || return 1
+
+            status=$(aws ssm get-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/status" \
+              --query "Parameter.Value" \
+              --output text 2>/dev/null) || return 1
+
+            echo "$active|$passive|$status|$region"
+          }
+
+          DR_STATE=""
+
+          for region in eu-central-1 eu-west-1; do
+            if DR_STATE=$(read_state_from_region "$region"); then
+              break
+            fi
+          done
+
+          if [ -z "$DR_STATE" ]; then
+            echo "Could not read DR state from either region."
+            exit 1
+          fi
+
+          IFS='|' read -r ACTIVE_REGION PASSIVE_REGION DR_STATUS CONTROL_REGION <<< "$DR_STATE"
+
+          if [ "$DR_STATUS" != "failed-over" ]; then
+            echo "Rebuild requires status=failed-over. Current status: $DR_STATUS"
+            exit 1
+          fi
+
+          case "$ACTIVE_REGION:$PASSIVE_REGION" in
+            eu-central-1:eu-west-1|eu-west-1:eu-central-1)
+              ;;
+            *)
+              echo "Unsupported region pair: $ACTIVE_REGION -> $PASSIVE_REGION"
+              exit 1
+              ;;
+          esac
+
+          echo "ACTIVE_REGION=$ACTIVE_REGION" >> "$GITHUB_ENV"
+          echo "PASSIVE_REGION=$PASSIVE_REGION" >> "$GITHUB_ENV"
+
+          echo "Current active region: $ACTIVE_REGION"
+          echo "Region to rebuild: $PASSIVE_REGION"
+          echo "State read from: $CONTROL_REGION"
+
+      - name: Mark DR as rebuilding
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for region in eu-central-1 eu-west-1; do
+            aws ssm put-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/status" \
+              --type String \
+              --value "rebuilding" \
+              --overwrite
+          done
+
+      - name: Resolve database identifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "$ACTIVE_REGION" = "eu-central-1" ]; then
+            ACTIVE_DB_ID="cloud-final-dev-database"
+            PASSIVE_DB_ID="cloud-final-dev-standby-database"
+          else
+            ACTIVE_DB_ID="cloud-final-dev-standby-database"
+            PASSIVE_DB_ID="cloud-final-dev-database"
+          fi
+
+          ACTIVE_DB_ARN=$(aws rds describe-db-instances \
+            --region "$ACTIVE_REGION" \
+            --db-instance-identifier "$ACTIVE_DB_ID" \
+            --query "DBInstances[0].DBInstanceArn" \
+            --output text)
+
+          ACTIVE_DB_STATUS=$(aws rds describe-db-instances \
+            --region "$ACTIVE_REGION" \
+            --db-instance-identifier "$ACTIVE_DB_ID" \
+            --query "DBInstances[0].DBInstanceStatus" \
+            --output text)
+
+          ACTIVE_REPLICA_SOURCE=$(aws rds describe-db-instances \
+            --region "$ACTIVE_REGION" \
+            --db-instance-identifier "$ACTIVE_DB_ID" \
+            --query "DBInstances[0].ReadReplicaSourceDBInstanceIdentifier" \
+            --output text)
+
+          if [ "$ACTIVE_DB_STATUS" != "available" ]; then
+            echo "Active database is not available: $ACTIVE_DB_STATUS"
+            exit 1
+          fi
+
+          if [ -n "$ACTIVE_REPLICA_SOURCE" ] && [ "$ACTIVE_REPLICA_SOURCE" != "None" ]; then
+            echo "Active database is unexpectedly still a read replica."
+            exit 1
+          fi
+
+          echo "ACTIVE_DB_ID=$ACTIVE_DB_ID" >> "$GITHUB_ENV"
+          echo "PASSIVE_DB_ID=$PASSIVE_DB_ID" >> "$GITHUB_ENV"
+          echo "ACTIVE_DB_ARN=$ACTIVE_DB_ARN" >> "$GITHUB_ENV"
+
+          echo "Active database: $ACTIVE_DB_ID"
+          echo "Former primary to rebuild: $PASSIVE_DB_ID"
+
+      - name: Wait for active database stability
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws rds wait db-instance-available \
+            --region "$ACTIVE_REGION" \
+            --db-instance-identifier "$ACTIVE_DB_ID"
+
+          echo "Active RDS is available."
+
+      - name: Terraform init
+        working-directory: infrastructure/terraform
+        run: terraform init
+
+      - name: Terraform validate
+        working-directory: infrastructure/terraform
+        run: terraform validate
+
+      - name: Terraform plan rebuild
+        working-directory: infrastructure/terraform
+        run: |
+          set -euo pipefail
+
+          terraform plan \
+            -out=rebuild.tfplan
+
+          terraform show -no-color rebuild.tfplan | tee rebuild-plan.txt
+
+          if ! grep -q "module.*database.aws_db_instance.main must be replaced" rebuild-plan.txt; then
+            echo "Warning: plan does not show an RDS replacement."
+            echo "The replica may already have been rebuilt."
+          fi
+
+      - name: Terraform apply rebuild
+        working-directory: infrastructure/terraform
+        run: terraform apply -auto-approve rebuild.tfplan
+
+      - name: Wait for rebuilt replica
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws rds wait db-instance-available \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID"
+
+      - name: Validate rebuilt replica
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DB_STATUS=$(aws rds describe-db-instances \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --query "DBInstances[0].DBInstanceStatus" \
+            --output text)
+
+          REPLICA_SOURCE=$(aws rds describe-db-instances \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --query "DBInstances[0].ReadReplicaSourceDBInstanceIdentifier" \
+            --output text)
+
+          if [ "$DB_STATUS" != "available" ]; then
+            echo "Rebuilt database is not available."
+            exit 1
+          fi
+
+          if [ -z "$REPLICA_SOURCE" ] || [ "$REPLICA_SOURCE" = "None" ]; then
+            echo "Rebuilt database is not a read replica."
+            exit 1
+          fi
+
+          if [ "$REPLICA_SOURCE" != "$ACTIVE_DB_ARN" ]; then
+            echo "Replica source does not match current active RDS."
+            echo "Expected: $ACTIVE_DB_ARN"
+            echo "Actual:   $REPLICA_SOURCE"
+            exit 1
+          fi
+
+          echo "Replica rebuilt successfully."
+          echo "Active:  $ACTIVE_REGION / $ACTIVE_DB_ID"
+          echo "Passive: $PASSIVE_REGION / $PASSIVE_DB_ID"
+          echo "Source:  $REPLICA_SOURCE"
+
+      - name: Commit healthy DR state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for region in eu-central-1 eu-west-1; do
+            aws ssm put-parameter \
+              --region "$region" \
+              --name "/cloud-final/dr/status" \
+              --type String \
+              --value "healthy" \
+              --overwrite
+          done
+
+          echo "DR topology is healthy again."
+          echo "Active region remains: $ACTIVE_REGION"
+          echo "Passive region remains: $PASSIVE_REGION"
+
+      - name: Upload rebuild evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dr-rebuild-evidence
+          path: |
+            infrastructure/terraform/rebuild-plan.txt
+          if-no-files-found: warn
