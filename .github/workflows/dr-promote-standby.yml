@@ -1,4 +1,130 @@
-name: dr-promote-standby.yml
+name: DR Promote Standby
+
 on:
+  workflow_dispatch:
+    inputs:
+      confirmation:
+        description: 'Write PROMOTE to confirm permanent failover'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
+  promote-standby:
+    if: ${{ inputs.confirmation == 'PROMOTE' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: eu-central-1
+
+      - name: Read DR state
+        run: |
+          ACTIVE_REGION=$(aws ssm get-parameter \
+            --region eu-central-1 \
+            --name "/cloud-final/dr/active-region" \
+            --query "Parameter.Value" \
+            --output text)
+
+          PASSIVE_REGION=$(aws ssm get-parameter \
+            --region eu-central-1 \
+            --name "/cloud-final/dr/passive-region" \
+            --query "Parameter.Value" \
+            --output text)
+
+          DR_STATUS=$(aws ssm get-parameter \
+            --region eu-central-1 \
+            --name "/cloud-final/dr/status" \
+            --query "Parameter.Value" \
+            --output text)
+
+          echo "ACTIVE_REGION=$ACTIVE_REGION" >> "$GITHUB_ENV"
+          echo "PASSIVE_REGION=$PASSIVE_REGION" >> "$GITHUB_ENV"
+          echo "DR_STATUS=$DR_STATUS" >> "$GITHUB_ENV"
+
+          echo "Active region: $ACTIVE_REGION"
+          echo "Passive region: $PASSIVE_REGION"
+          echo "DR status: $DR_STATUS"
+
+      - name: Validate DR state
+        run: |
+          if [ "$DR_STATUS" != "healthy" ]; then
+            echo "Promotion requires status=healthy. Current status: $DR_STATUS"
+            exit 1
+          fi
+
+          if [ "$ACTIVE_REGION" = "$PASSIVE_REGION" ]; then
+            echo "Active and passive regions cannot be equal."
+            exit 1
+          fi
+
+      - name: Resolve regional resources
+        run: |
+          if [ "$PASSIVE_REGION" = "eu-west-1" ]; then
+            PASSIVE_DB_ID="cloud-final-dev-standby-database"
+            PASSIVE_INSTANCE_NAME="cloud-final-dev-standby-default-instance"
+            PASSIVE_ALB_NAME="cloud-final-dev-standby-alb"
+          elif [ "$PASSIVE_REGION" = "eu-central-1" ]; then
+            PASSIVE_DB_ID="cloud-final-dev-database"
+            PASSIVE_INSTANCE_NAME="cloud-final-dev-default-instance"
+            PASSIVE_ALB_NAME="cloud-final-dev-alb"
+          else
+            echo "Unsupported passive region: $PASSIVE_REGION"
+            exit 1
+          fi
+
+          PASSIVE_INSTANCE_ID=$(aws ec2 describe-instances \
+            --region "$PASSIVE_REGION" \
+            --filters \
+              "Name=tag:Name,Values=$PASSIVE_INSTANCE_NAME" \
+              "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+
+          PASSIVE_ALB_DNS=$(aws elbv2 describe-load-balancers \
+            --region "$PASSIVE_REGION" \
+            --names "$PASSIVE_ALB_NAME" \
+            --query "LoadBalancers[0].DNSName" \
+            --output text)
+
+          echo "PASSIVE_DB_ID=$PASSIVE_DB_ID" >> "$GITHUB_ENV"
+          echo "PASSIVE_INSTANCE_ID=$PASSIVE_INSTANCE_ID" >> "$GITHUB_ENV"
+          echo "PASSIVE_ALB_DNS=$PASSIVE_ALB_DNS" >> "$GITHUB_ENV"
+
+          echo "Passive database: $PASSIVE_DB_ID"
+          echo "Passive EC2: $PASSIVE_INSTANCE_ID"
+          echo "Passive ALB: $PASSIVE_ALB_DNS"
+
+      - name: Validate passive RDS replica
+        run: |
+          DB_STATUS=$(aws rds describe-db-instances \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --query "DBInstances[0].DBInstanceStatus" \
+            --output text)
+
+          REPLICA_SOURCE=$(aws rds describe-db-instances \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --query "DBInstances[0].ReadReplicaSourceDBInstanceIdentifier" \
+            --output text)
+
+          echo "RDS status: $DB_STATUS"
+          echo "Replica source: $REPLICA_SOURCE"
+
+          if [ "$DB_STATUS" != "available" ]; then
+            echo "Passive RDS is not available."
+            exit 1
+          fi
+
+          if [ -z "$REPLICA_SOURCE" ] || [ "$REPLICA_SOURCE" = "None" ]; then
+            echo "Passive RDS is not a read replica."
+            exit 1
+          fi
