@@ -169,7 +169,27 @@ jobs:
 
           echo "Active database: $ACTIVE_DB_ID"
           echo "Former primary to rebuild: $PASSIVE_DB_ID"
+      
 
+      - name: Delete former primary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws rds delete-db-instance \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID" \
+            --skip-final-snapshot
+
+      - name: Wait for deletion
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          aws rds wait db-instance-deleted \
+            --region "$PASSIVE_REGION" \
+            --db-instance-identifier "$PASSIVE_DB_ID"
+          
       - name: Wait for active database stability
         shell: bash
         run: |
