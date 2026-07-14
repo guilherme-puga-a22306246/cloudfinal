@@ -2,57 +2,73 @@
 
 ## Overview
 
-This project implements an automated Disaster Recovery (DR) architecture on AWS using Infrastructure as Code (Terraform), CI/CD (GitHub Actions), Route 53 DNS failover and a warm standby deployment.
+This project implements an automated **Warm Standby Disaster Recovery architecture** on AWS using:
 
-The objective is to ensure service continuity in the event of a failure affecting the primary deployment without requiring manual DNS changes.
+- Terraform
+- GitHub Actions
+- Amazon Route 53 Failover Routing
+- Amazon RDS Cross-Region Read Replication
+- AWS Systems Manager Parameter Store (SSM)
+- Ansible
+
+The solution provides automated disaster recovery while maintaining infrastructure consistency after failover. The deployment automatically adapts to whichever AWS region is currently marked as active.
 
 ---
 
 # Architecture
 
-## Primary Environment
+## Active Region
 
-- Availability Zone: eu-central-1a
-- EC2
+Contains:
+
+- EC2 Instance
 - Application Load Balancer
-- Amazon RDS PostgreSQL (Multi-AZ)
+- Amazon RDS PostgreSQL Primary (Multi-AZ)
 - Amazon SQS
 
-## Standby Environment
+## Passive Region
 
-- Availability Zone: eu-central-1b
-- EC2
+Contains:
+
+- EC2 Instance
 - Application Load Balancer
-- Amazon RDS Read Replica
+- Amazon RDS Cross-Region Read Replica
 - Amazon SQS
 
-Traffic is routed through Amazon Route 53 using DNS failover.
+Traffic is managed through Amazon Route 53 Failover Routing.
+
+Unlike the initial implementation, the active region is no longer fixed. Instead, the active/passive roles are dynamically stored in AWS Systems Manager Parameter Store.
 
 ---
 
-# Disaster Recovery Strategy
+# DR State Management
 
-This implementation follows a **Warm Standby** strategy.
+The Disaster Recovery state is stored in AWS Systems Manager Parameter Store.
 
-The standby environment is permanently provisioned but only receives production traffic when the Route 53 health check detects that the primary environment is unavailable.
+Parameters:
 
-Advantages:
+```
+/cloud-final/dr/active-region
+/cloud-final/dr/passive-region
+/cloud-final/dr/status
+```
 
-- Low Recovery Time Objective (RTO)
-- Minimal operational intervention
-- Infrastructure already provisioned
-- Automated DNS failover
+Possible states:
 
-Trade-off:
+```
+healthy
+failing-over
+failed-over
+rebuilding
+```
 
-- Higher infrastructure cost than Pilot Light
-- Faster recovery
+This allows every workflow and Terraform deployment to determine the current topology automatically.
 
 ---
 
 # Infrastructure Provisioning
 
-All infrastructure is provisioned through Terraform.
+Infrastructure is fully provisioned using Terraform.
 
 Modules:
 
@@ -64,7 +80,12 @@ Modules:
 - sqs
 - route53
 
-The standby environment is created by reusing the same Terraform modules as the primary deployment using different parameters.
+The Route 53 Terraform module automatically reads the active region from SSM Parameter Store and assigns:
+
+- PRIMARY Route 53 record
+- SECONDARY Route 53 record
+
+This removes the need to manually modify Terraform after every disaster recovery event.
 
 ---
 
@@ -72,7 +93,7 @@ The standby environment is created by reusing the same Terraform modules as the 
 
 Deployment is fully automated through GitHub Actions.
 
-Pipeline:
+Deployment Pipeline:
 
 1. Checkout repository
 2. Authenticate to AWS using OIDC
@@ -81,79 +102,120 @@ Pipeline:
 5. Terraform Plan
 6. Terraform Apply
 7. Export Terraform Outputs
-8. Configure Ansible Inventory
-9. Deploy application using Ansible
+8. Generate Ansible Inventory
+9. Deploy services using Ansible
 
-Both primary and standby environments are deployed from the same pipeline.
+The deployment pipeline automatically deploys according to the region currently marked as active.
 
 ---
 
 # Health Monitoring
 
-Route 53 continuously checks:
+Amazon Route 53 continuously monitors:
 
 ```
 http://cloud.guilhermepuga.pt/actuator/health
 ```
 
-Health Check:
+Configuration:
 
 - Protocol: HTTP
 - Interval: 30 seconds
 - Failure Threshold: 3
 
-If the primary endpoint becomes unhealthy, Route 53 automatically routes traffic to the standby environment.
+If the active environment becomes unavailable, Route 53 automatically redirects traffic to the standby environment.
 
-No manual console interaction is required.
-
----
-
-# Failover Procedure
-
-## Simulating a failure
-
-Stop the Primary EC2 instance.
-
-Example:
-
-```
-aws ec2 stop-instances --instance-ids <PRIMARY_INSTANCE_ID>
-```
+No manual DNS changes are required.
 
 ---
 
-## Expected behaviour
+# Disaster Recovery Workflows
 
-1. Primary health check fails.
-2. Route 53 detects the failure.
-3. DNS failover occurs automatically.
-4. Requests are redirected to the standby Application Load Balancer.
-5. Manually promote the standby RDS Read Replica to become the new primary database.
+## 1. DR Failover Drill
 
-```bash
-aws rds promote-read-replica --db-instance-identifier cloud-final-dev-standby-database --backup-retention-period 7 --region eu-central-1
-  ```
-6. wait for the promotion to complete (can take several minutes).
-```bash
-aws rds wait db-instance-available --db-instance-identifier cloud-final-dev-standby-database --region eu-central-1
-```
-7. Service remains available.
+Purpose:
+
+Simulate a disaster without permanently changing the production topology.
+
+Operations:
+
+- Stop the active EC2 instance
+- Wait for Route 53 automatic failover
+- Validate application health
+- Restart the original EC2 instance
+
+This workflow validates the failover mechanism without modifying the database topology.
 
 ---
 
-### Why manual promotion of the RDS Read Replica is required?
+## 2. DR Promote Standby
 
-Automatic promotion was intentionally not implemented to avoid split-brain scenarios and unintended promotions caused by transient health-check failures or false positives.
+Purpose:
 
-# Rollback Procedure
+Promote the standby environment to become the new production environment.
 
-Start the primary EC2 instance.
+Operations:
+
+- Promote the RDS Read Replica
+- Wait for promotion completion
+- Update Route 53 failover records
+- Update SSM Parameter Store
+- Mark DR state as:
 
 ```
-aws ec2 start-instances --instance-ids <PRIMARY_INSTANCE_ID>
+failed-over
 ```
 
-Once the health check becomes healthy again, Route 53 automatically restores traffic to the primary deployment.
+After this workflow completes:
+
+- The standby region becomes the new production environment.
+- Route 53 routes all traffic to the new region.
+- Terraform deployments automatically adapt to the new active region.
+
+---
+
+## 3. DR Rebuild Former Primary
+
+Purpose:
+
+Restore the former primary region as the new standby environment.
+
+Operations:
+
+- Remove the previous primary database
+- Create a new Cross-Region Read Replica
+- Wait for replication
+- Validate replica health
+- Update DR state to:
+
+```
+healthy
+```
+
+At the end of this workflow, the architecture returns to a fully operational Warm Standby configuration.
+
+---
+
+# Disaster Recovery Flow
+
+```
+Healthy
+   │
+   ▼
+Failover Drill (optional)
+   │
+   ▼
+Promote Standby
+   │
+   ▼
+Application running in new region
+   │
+   ▼
+Rebuild Former Primary
+   │
+   ▼
+Healthy
+```
 
 ---
 
@@ -161,7 +223,15 @@ Once the health check becomes healthy again, Route 53 automatically restores tra
 
 ## Recovery Time Objective (RTO)
 
-DNS failover + tempo de promoção da réplica
+Recovery time consists of:
+
+- Route 53 failure detection
+- DNS failover propagation
+- RDS Read Replica promotion
+
+Expected RTO:
+
+average of 131 seconds (2 minutes and 11 seconds)
 
 ---
 
@@ -170,13 +240,13 @@ DNS failover + tempo de promoção da réplica
 Database protection is provided through:
 
 - Amazon RDS Multi-AZ
-- Amazon RDS Read Replica
-- Automated backups (7-day retention)
-- Standby RDS promotion to primary 
+- Amazon RDS Cross-Region Read Replica
+- Automated backups
+- Continuous asynchronous replication
 
 Expected RPO:
 
-Seconds/minutes, dependent on the replication lag
+Seconds to a few minutes depending on replication lag.
 
 ---
 
@@ -188,43 +258,62 @@ Resources running permanently:
 
 - Standby EC2
 - Standby ALB
-- Standby RDS Replica
+- Standby RDS Read Replica
+- Standby SQS
 
-This increases operational cost compared to a Pilot Light solution but significantly reduces recovery time.
+Advantages:
+
+- Low Recovery Time
+- Minimal operational intervention
+- Automatic DNS failover
+- Fast infrastructure recovery
+
+Trade-off:
+
+Higher infrastructure cost compared to a Pilot Light architecture.
 
 ---
 
 # Validation Checklist
 
 - Terraform provisions both environments.
-- GitHub Actions deploys both environments.
-- Route 53 health checks configured.
-- DNS failover operational.
+- GitHub Actions successfully deploys both environments.
+- Route 53 Failover Routing configured.
+- Route 53 Health Checks operational.
 - Multi-AZ database enabled.
-- Read replica configured.
-- Standby reachable.
-- Failover successfully demonstrated.
+- Cross-Region Read Replica configured.
+- Standby environment reachable.
+- Automatic failover validated.
+- Standby promotion validated.
+- Former primary rebuilt successfully.
+- SSM Parameter Store updated automatically.
+- Infrastructure restored to Healthy state.
 
 ---
 
 # Repository Structure
 
-```
-.github/workflows/
+```text
+.github/
+└── workflows/
+    ├── deploy.yml
+    ├── dr-failover-drill.yml
+    ├── dr-promote-standby.yml
+    └── dr-rebuild-former-primary.yml
 
 ansible/
 
 infrastructure/
-    terraform/
-        modules/
-            app_environment/
-            alb/
-            ec2/
-            route53/
-            rds/
-            sqs/
-            vpc/
+└── terraform/
+    └── modules/
+        ├── app_environment/
+        ├── alb/
+        ├── ec2/
+        ├── route53/
+        ├── rds/
+        ├── sqs/
+        └── vpc/
 
 docs/
-    dr.md
+└── dr.md
 ```
