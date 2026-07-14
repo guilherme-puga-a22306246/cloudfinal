@@ -458,7 +458,7 @@ jobs:
                 "ResourceRecordSet": {
                   "Name": "${DOMAIN_NAME}",
                   "Type": "A",
-                  "SetIdentifier": "${PASSIVE_REGION}",
+                  "SetIdentifier": "primary",
                   "Failover": "PRIMARY",
                   "HealthCheckId": "${NEW_ACTIVE_HEALTH_CHECK_ID}",
                   "AliasTarget": {
@@ -473,7 +473,7 @@ jobs:
                 "ResourceRecordSet": {
                   "Name": "${DOMAIN_NAME}",
                   "Type": "A",
-                  "SetIdentifier": "${ACTIVE_REGION}",
+                  "SetIdentifier": "standby",
                   "Failover": "SECONDARY",
                   "HealthCheckId": "${OLD_ACTIVE_HEALTH_CHECK_ID}",
                   "AliasTarget": {
