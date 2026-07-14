@@ -22,8 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
-    # Podes associar isto a um GitHub Environment com aprovação obrigatória.
-    environment: disaster-recovery
 
     steps:
       - name: Checkout repository
