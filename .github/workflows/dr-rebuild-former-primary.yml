@@ -171,15 +171,31 @@ jobs:
           echo "Former primary to rebuild: $PASSIVE_DB_ID"
       
 
-      - name: Delete former primary
+      - name: Delete former primary (if it exists)
         shell: bash
         run: |
           set -euo pipefail
 
-          aws rds delete-db-instance \
+          if aws rds describe-db-instances \
             --region "$PASSIVE_REGION" \
-            --db-instance-identifier "$PASSIVE_DB_ID" \
-            --skip-final-snapshot
+            --db-instance-identifier "$PASSIVE_DB_ID" >/dev/null 2>&1; then
+
+            echo "Deleting former primary..."
+
+            aws rds delete-db-instance \
+              --region "$PASSIVE_REGION" \
+              --db-instance-identifier "$PASSIVE_DB_ID" \
+              --skip-final-snapshot
+
+            aws rds wait db-instance-deleted \
+              --region "$PASSIVE_REGION" \
+              --db-instance-identifier "$PASSIVE_DB_ID"
+
+            echo "Former primary deleted."
+
+          else
+            echo "Former primary already deleted."
+          fi
 
       - name: Wait for deletion
         shell: bash
@@ -189,7 +205,7 @@ jobs:
           aws rds wait db-instance-deleted \
             --region "$PASSIVE_REGION" \
             --db-instance-identifier "$PASSIVE_DB_ID"
-          
+
       - name: Wait for active database stability
         shell: bash
         run: |
